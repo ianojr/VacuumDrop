@@ -38,8 +38,11 @@ body, and should consider streaming the chunk body rather than materialising a
 | | |
 | --- | --- |
 | **Affects** | Phase 3 |
-| **Proposed** | `windows` crate, quarantined in `vacuumdrop-platform-windows`; escalate to a C#/WinRT helper only if the Phase-3 spike proves it necessary — [ADR-0009](./adr/0009-windows-wifi-direct-binding.md) |
-| **Required first** | The Phase-3 spike described in ADR-0009. |
+| **Status** | **Resolved 2026-10-04 - `windows` crate, no helper component needed.** Ratified in [ADR-0009](./adr/0009-windows-wifi-direct-binding.md). |
+| **Decision** | `windows` 0.62.2 + `windows-future` 0.3, quarantined in `vacuumdrop-platform-windows`. |
+| **Evidence** | `IAsyncOperation` implements `IntoFuture`, so it drives on Tokio with no message pump. Zero `unsafe` in our code. `WiFiDirectAdvertisementPublisher` is bound. |
+| **Correction** | The spike disproved two draft premises: `WiFiDirectDeviceListWatcher` is not in the binding (use `DeviceInformation` + `DeviceWatcher::Added`), and the approach does not require `unsafe`. |
+| **Carried forward** | DHCP sufficiency is API-plausible but unverified on hardware, and capability detection still over-claims. Both are Phase 3 exit criteria. |
 
 ### Q-7 — Handshake / record protocol (Noise vs TLS 1.3)
 

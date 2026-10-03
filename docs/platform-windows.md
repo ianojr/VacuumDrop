@@ -86,12 +86,9 @@ No WinRT type appears in any public signature that crosses into
 Per Charter 6, the adapter must expose:
 
 ```text
-is_supported()     # does this machine have a Direct-capable adapter?
-is_enabled()       # is Wi-Fi Direct currently enabled/policy-allowed?
+detect_capability()  # layered: available / no adapter / disabled / probe failed
 discover_peers()
-connect(peer)
-disconnect(peer)
-get_connection_info()
+connect_by_id(device_id)
 ```
 
 Detection must reflect **actual hardware/driver capability**, not merely the
@@ -101,15 +98,94 @@ Direct in name only.
 Support is a per-device, per-driver property. Never claim "works on every
 device."
 
+### 4.1 What is actually probed
+
+Two independent questions, because a single check cannot answer both:
+
+| # | Question | API | What a pass proves |
+| --- | --- | --- | --- |
+| 1 | Can we enumerate peers? | `WiFiDirectDevice::GetDeviceSelector()` | Windows resolved the P2P device query. |
+| 2 | Can we be a group owner? | `WiFiDirectAdvertisementPublisher::new()` + `Status()` | The driver will actually run a group. |
+
+**Question 1 alone is not sufficient.** A non-empty AQS selector is returned by
+machines whose driver is corporate-locked, whose Wi-Fi Direct feature is disabled
+by policy, or whose adapter lacks the group-owner role. Reporting "available"
+from the selector alone is the over-claim ADR-0009 requirement 3 forbids, so the
+publisher probe is mandatory.
+
+`WiFiDirectAdvertisementPublisherStatus` has only `Created`, `Started`,
+`Stopped`, and `Aborted` - there is **no `Unsupported` value**. That is exactly
+why object creation is the meaningful test: if the driver cannot act as group
+owner, `new()` itself fails.
+
+### 4.2 The probe has no side effect
+
+The capability probe calls `new()` and `Status()` but **never `Start()`**, so
+running it never makes the machine discoverable to the room. A check that
+broadcasts the device's presence as a side effect would be a surprising way to
+answer "is this supported?"
+
+### 4.3 Run it
+
+From the CLI:
+
+```powershell
+cargo run --features wifi-direct --bin p2p -- wifi-direct probe
+```
+
+Or from the adapter directly:
+
+```powershell
+cargo run -p vacuumdrop-platform-windows --example probe
+```
+
+Both print the raw verdict for this host. Capability is the one part of Phase 3
+that no unit test can validate, since it depends on the real radio, driver, and
+policy of the machine. The commands exist so a hardware run records evidence
+instead of asserting success.
+
+### 4.4 The `wifi-direct` build flag
+
+Wi-Fi Direct support is **off by default**:
+
+```toml
+[target.'cfg(windows)'.dependencies]
+vacuumdrop-platform-windows = { ..., optional = true }
+
+[features]
+wifi-direct = ["dep:vacuumdrop-platform-windows"]
+```
+
+Two reasons, both deliberate:
+
+1. **Portability.** `p2p` is the portable front end; platform crates are the
+   replaceable back end. A hard dependency would make the binary Windows-only,
+   which is the coupling Charter 47 exists to prevent.
+2. **Honesty.** Real two-device P2P is unvalidated. Default-on would ship a path
+   that has never worked.
+
+Without the flag, `p2p wifi-direct ...` fails with the exact command needed to
+rebuild. It does **not** silently do nothing, and it is not reported as an
+adapter fault. `p2p help` states which build you are running.
+
+### 4.5 Verified on hardware
+
+On the development host the probe reports `available (wifi-direct)`, confirming
+group-owner creation works on a real adapter with a real driver.
+
+Not yet verified: a real group formation between two devices, and whether DHCP
+assignment behaves as the API suggests.
+
 ---
 
 ## 5. Known Environment Variables
 
 | Failure | Symptom | Handling |
 | --- | --- | --- |
-| Adapter lacks P2P | `discover_peers()` returns empty, always | Report unsupported, not "no peers" |
-| Policy blocks P2P | Discovery starts, no results | Distinguish from unsupported |
+| Adapter lacks P2P | `detect_capability()` reports `no adapter` or `probe failed` | Report unsupported, not "no peers" |
+| Policy blocks P2P | Publisher creation or status fails | Reported as `disabled`, distinct from unsupported |
 | Driver/VIF creation fails | Connect error | Surface driver-specific error text |
+| VPN callout blocks sockets | `WSAEACCES` / os error `10013` on connect | Disable the VPN; see [`troubleshooting.md`](./troubleshooting.md) |
 | Interface disappears mid-transfer | Transfer aborts | Must produce a defined state transition ([`troubleshooting.md`](./troubleshooting.md)) |
 
 ---
@@ -118,19 +194,66 @@ device."
 
 Two Windows devices, both with Direct-capable adapters.
 
-```text
-1. Confirm is_supported() == true on both
-2. Device A: publish advertisements
-3. Device B: run discovery, confirm Device A appears
-4. Device B: initiate connect, wait for group formed
-5. Read ConnectionInfo -> IP + port
-6. Hand to Rust core: p2p connect <ip:port>
-7. Run the Phase-1 protocol over it, unchanged
+### 6.1 The procedure
+
+Every command below has been executed at least once. On the device that will
+**host** the session:
+
+```powershell
+# terminal 1 - become discoverable
+p2p wifi-direct advertise 300
+
+# terminal 2 - accept the session
+p2p listen --addr 0.0.0.0:9000
 ```
 
-Step 7 is the acceptance test for
-[ADR-0004](./adr/0004-transport-abstraction.md): **the protocol must require no
-changes.** If it does, the abstraction leaked.
+On the device that will **connect**:
+
+```powershell
+p2p wifi-direct probe                  # confirm this machine supports it
+p2p wifi-direct discover               # list peers; note the device-id
+p2p wifi-direct connect <device-id>    # form the group, then handshake
+```
+
+`connect` prints the group address it was assigned, connects over TCP, and runs
+the unchanged Phase 1 handshake. Both sides then report a session id, protocol
+version, peer name, and chunk size.
+
+### 6.2 Why `listen --addr 0.0.0.0`
+
+The host must be reachable on the P2P interface. Binding to `0.0.0.0` also
+accepts connections from the normal network, which is **not** the shipping
+configuration — that will bind only the P2P interface, once this side learns its
+own address (see 6.4). For a two-device test rig on an isolated network it is
+acceptable, and `advertise` says so in its own output rather than leaving it
+implicit.
+
+### 6.3 Why the host half is a separate command
+
+`p2p wifi-direct advertise` deliberately does **not** serve the session itself.
+Doing so requires this side to discover the P2P interface's own address, via
+`Windows.Networking.Connectivity` — a second platform subsystem, which cannot be
+tested without a second device. Splitting it out means every step of the
+procedure runs code that has already been executed.
+
+### 6.4 What is still unverified
+
+| Claim | Status |
+| --- | --- |
+| Group forms between two devices | **Untested.** Needs two devices. |
+| DHCP assigns a usable address | **Untested.** API suggests yes (ADR-0009 Q3). |
+| Discovery finds an advertising peer | **Untested.** The scan itself is verified to run; that it finds a *real* peer is not. |
+| Binding only the P2P interface | Not implemented. |
+
+### 6.5 Step 7 is the acceptance test
+
+Running the Phase 1 protocol unchanged over the P2P link is the acceptance test
+for [ADR-0004](./adr/0004-transport-abstraction.md): **the protocol must require
+no changes.** If it does, the abstraction leaked.
+
+This is structurally enforced. `wifi_direct_connect` calls the adapter for
+exactly one thing — an address — and then uses the ordinary `TcpConnector` and
+`Session`. No radio concept appears below that line.
 
 ---
 
@@ -151,12 +274,14 @@ Do not record these results as Wi-Fi Direct results.
 
 ## 8. Open Questions
 
-| Question | Reference |
-| --- | --- |
-| `windows` crate vs helper component | [ADR-0009](./adr/0009-windows-wifi-direct-binding.md) |
-| Static IP vs DHCP-allocated IP after group formation | Phase 3 spike |
-| IPv6 support | Deferred |
-| Whether to ship a GUI settings page for adapter diagnostics | Phase 8 |
+| Question | Status | Reference |
+| --- | --- | --- |
+| `windows` crate vs helper component | **Resolved** - direct `windows` crate, no helper | [ADR-0009](./adr/0009-windows-wifi-direct-binding.md) |
+| Static IP vs DHCP-allocated IP after group formation | API says DHCP sufficient; **unverified on hardware** | ADR-0009 spike Q3 |
+| `DeviceInformation` watcher-based peer discovery | Not wired up; `discovery` feature is a declared stub | `src/discovery.rs` |
+| Wi-Fi Direct device friendly name | **Unavailable from the platform.** `WiFiDirectDevice` has no `Name` accessor; the protocol carries no name. Reports the device id. | ADR-0009 |
+| IPv6 support | Deferred, but link-local is the expected P2P case and `ConnectionInfo` renders/brackets it correctly | - |
+| Whether to ship a GUI settings page for adapter diagnostics | Phase 8 | - |
 
 ---
 
@@ -166,6 +291,8 @@ Do not record these results as Wi-Fi Direct results.
 | --- | --- |
 | 1, 2, 4 | Charter 46 (Windows), 6 |
 | 3 | Charter 54, 47 |
+| 4.1, 4.2 | ADR-0009 requirement 3, spike Q1 |
+| 4.3, 4.4 | Charter 6 (honest reporting), 76 |
 | 5 | Charter 6, 42 |
 | 6, 7 | Charter 77, 76 |
 | 2 (hotspot caveat) | Doc 2 section 4 |

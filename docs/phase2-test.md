@@ -1,8 +1,11 @@
 # Phase 2 Test Procedure — Two Machines
 
-Status: **Ready to run.** Requires two Windows devices and ~15 minutes.
+Status: **PASSED 2026-10-03.** Results: [`performance.md` §5.5](./performance.md).
 
-Spec: [`docs/roadmap.md` §6](roadmap.md)
+Retained as the reference procedure for re-runs on new hardware, and because
+Phase 3 uses this same rig minus the hotspot.
+
+Spec: [`roadmap.md` §6](./roadmap.md)
 
 ---
 
@@ -41,9 +44,25 @@ already broken across machines?
 - [ ] **Two Windows devices.** Laptops, desktops, whatever.
 - [ ] Both can reach the internet or have a copy of the repo — you will copy the
       built binaries across manually.
+- [ ] **Any VPN is DISABLED on both devices.** *(Not optional. See
+      Troubleshooting §0 — a Proton VPN callout driver caused the first failure,
+      with an error that looks like a permissions problem rather than a VPN
+      problem.)*
 - [ ] On **both**: Windows Firewall allows `p2p.exe` on **private networks**.
-      *(This is the single most common cause of failure. See Troubleshooting.)*
+      *(The most common cause after VPNs. See Troubleshooting.)*
 - [ ] Built binaries available on both (below).
+
+### Disable VPNs first
+
+```powershell
+# On each device, before testing
+Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'VPN|TUN|TAP|Proton|WireGuard' } |
+  Select-Object Name, Status, InterfaceDescription
+
+Disable-NetAdapter -Name "ProTUN" -Confirm:$false   # name varies
+```
+
+Re-enable with `Enable-NetAdapter -Name "ProTUN" -Confirm:$false` afterwards.
 
 ---
 
@@ -190,9 +209,47 @@ Result            : <both sides reached v1, or the exact failure>
 
 ## Troubleshooting
 
-Work through these in order. The first three cause the large majority of failures.
+Work through these in order.
 
-### 1. Windows Firewall drops the inbound connection *(most common)*
+### 0. `WSAEACCES` (os error 10013) — a VPN is filtering the connection
+
+**This is what actually happened on the first attempt.** Read it before touching
+firewall rules.
+
+Symptom: **every** TCP port fails and `ping` fails too, while ARP resolves
+normally. A firewall rule does not produce that combination.
+
+```text
+error: transport failed: i/o failed: An attempt was made to access a socket
+in a way forbidden by its access permissions. (os error 10013)
+```
+
+Cause: `ProtonVPNCallout`, a Windows Filtering Platform callout driver. It
+permitted DNS and web traffic but refused the LAN connection.
+
+```powershell
+# Find it
+Get-CimInstance Win32_SystemDriver |
+  Where-Object { $_.State -eq 'Running' -and $_.PathName -match 'proton|wireguard|tap|vpn' } |
+  Select-Object Name, PathName
+
+# Disable on the CLIENT device
+Disable-NetAdapter -Name "ProTUN" -Confirm:$false
+```
+
+**Confirm the OS is at fault before changing any code.** A plain .NET socket that
+reproduces the same error proves it:
+
+```powershell
+$c = New-Object System.Net.Sockets.TcpClient
+try { $c.Connect("192.168.137.1", 9000) } catch { $_.Exception.Message }
+```
+
+Ruled out along the way: correct client IP, correct default route (metric 0),
+ARP resolving, firewall block rules scoped to `127.0.0.0/8` only, firewall
+profiles enabled with no default overrides. Any VPN can do this.
+
+### 1. Windows Firewall drops the inbound connection
 
 Symptom: client reports `actively refused` (os error 10061) or a timeout.
 

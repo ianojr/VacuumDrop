@@ -10,6 +10,27 @@
 
 use std::net::SocketAddr;
 
+/// A Wi-Fi Direct subcommand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WifiDirect {
+    /// Report what this machine's Wi-Fi Direct stack supports.
+    Probe,
+    /// Form a group with a peer device id and negotiate a session over it.
+    Connect {
+        /// The peer's platform device id.
+        device_id: String,
+    },
+    /// Scan for nearby peers.
+    Discover,
+    /// Become discoverable and wait to be connected to.
+    Advertise {
+        /// How long to stay discoverable.
+        seconds: u64,
+        /// Use intensive discoverability, which also answers active scans.
+        intensive: bool,
+    },
+}
+
 /// What the user asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -32,6 +53,8 @@ pub enum Command {
         /// Peer address.
         addr: SocketAddr,
     },
+    /// Use the Windows Wi-Fi Direct adapter.
+    WifiDirect(WifiDirect),
 }
 
 /// A parsed command line.
@@ -82,6 +105,12 @@ pub enum ParseError {
     },
     /// The same flag was given twice.
     DuplicateFlag(&'static str),
+    /// A wifi-direct action was not recognised.
+    UnknownWifiDirectAction(String),
+    /// `wifi-direct connect` needs a device id.
+    MissingDeviceId,
+    /// A duration argument was not a positive number of seconds.
+    BadDuration(String),
 }
 
 impl std::fmt::Display for ParseError {
@@ -97,6 +126,17 @@ impl std::fmt::Display for ParseError {
                 write!(f, "`{flag}` is not valid for `{command}`")
             }
             ParseError::DuplicateFlag(v) => write!(f, "{v} given more than once"),
+            ParseError::UnknownWifiDirectAction(a) => write!(
+                f,
+                "unknown wifi-direct action `{a}` (expected probe, connect, or discover)"
+            ),
+            ParseError::MissingDeviceId => {
+                write!(f, "wifi-direct connect requires a device id")
+            }
+            ParseError::BadDuration(d) => write!(
+                f,
+                "`{d}` is not a valid duration (expected a positive number of seconds, e.g. 120)"
+            ),
         }
     }
 }
@@ -190,6 +230,90 @@ where
                 },
             }
         }
+        "wifi-direct" => {
+            let action = iter.next().ok_or(ParseError::MissingDeviceId)?;
+            let wifi = match action.as_str() {
+                "probe" => WifiDirect::Probe,
+                "discover" => WifiDirect::Discover,
+                "advertise" => {
+                    // Flags may appear before or after the duration, so both are
+                    // collected in one loop rather than assuming a fixed order.
+                    let mut seconds: Option<u64> = None;
+                    let mut intensive = false;
+                    for arg in iter.by_ref() {
+                        match arg.as_str() {
+                            "--intensive" => {
+                                if intensive {
+                                    return Err(ParseError::DuplicateFlag("--intensive"));
+                                }
+                                intensive = true;
+                            }
+                            other => {
+                                let raw = other.to_owned();
+                                let parsed =
+                                    raw.parse().map_err(|_| ParseError::BadDuration(raw))?;
+                                if parsed == 0 {
+                                    // Advertising for zero seconds is never what was
+                                    // meant, and would exit successfully having done
+                                    // nothing at all.
+                                    return Err(ParseError::BadDuration("0".to_owned()));
+                                }
+                                if seconds.is_some() {
+                                    return Err(ParseError::DuplicateFlag("<seconds>"));
+                                }
+                                seconds = Some(parsed);
+                            }
+                        }
+                    }
+                    WifiDirect::Advertise {
+                        // Defaulting rather than requiring a flag: the common case is
+                        // "stay findable until someone connects".
+                        seconds: seconds.unwrap_or(120),
+                        intensive,
+                    }
+                }
+                "connect" => {
+                    // The device id is opaque and platform-defined, so it is taken
+                    // as a single positional token and never parsed as a number or
+                    // address. Blank is rejected here so the failure names the
+                    // problem instead of surfacing later as a WinRT error.
+                    //
+                    // Trailing arguments are NOT consumed here: `--name` follows the
+                    // id, and eating it in this branch would silently drop it.
+                    let id = iter
+                        .next()
+                        .ok_or(ParseError::MissingDeviceId)?
+                        .trim()
+                        .to_owned();
+                    if id.is_empty() {
+                        return Err(ParseError::MissingDeviceId);
+                    }
+                    WifiDirect::Connect { device_id: id }
+                }
+                other => return Err(ParseError::UnknownWifiDirectAction(other.to_owned())),
+            };
+            // `--name` still applies: the device name is carried in the handshake,
+            // which runs unchanged once the group is formed.
+            while let Some(arg) = iter.next() {
+                if arg == "--name" {
+                    if device_name != name {
+                        return Err(ParseError::DuplicateFlag("--name"));
+                    }
+                    device_name = iter.next().ok_or(ParseError::MissingValue("--name"))?;
+                } else if arg.starts_with('-') {
+                    return Err(ParseError::UnknownFlag {
+                        command: "wifi-direct",
+                        flag: arg,
+                    });
+                } else {
+                    // A bare extra word means the user misunderstood the syntax.
+                    // Reporting it as an unknown *flag* would be misleading, so the
+                    // two cases get distinct errors.
+                    return Err(ParseError::UnknownWifiDirectAction(arg));
+                }
+            }
+            Command::WifiDirect(wifi)
+        }
         other => return Err(ParseError::UnknownCommand(other.to_owned())),
     };
 
@@ -225,8 +349,15 @@ COMMANDS:
     listen [--addr <host:port>]   Accept incoming sessions
     connect <host:port>          Connect to a peer and negotiate a session
     ping <host:port>             Send a keepalive probe
+    wifi-direct <action>         Windows Wi-Fi Direct (see below)
     help                         Show this help
     version                      Show the build version
+
+WIFI-DIRECT ACTIONS:
+    probe                        Report what this machine supports
+    discover                     Scan for nearby peers
+    advertise [seconds]          Become discoverable (default 120s)
+    connect <device-id>          Form a group, then negotiate a session
 
 OPTIONS:
     --name <name>                Device name reported during the handshake
@@ -236,19 +367,45 @@ OPTIONS:
 DEFAULT:
     listen binds {bind}
 
+WIFI-DIRECT BUILD FLAG:
+    {wifi_direct_flag}
+
 NOTES:
     Phase 1 sessions are UNENCRYPTED and UNAUTHENTICATED. Version negotiation
     proves both peers speak the same protocol; it does not establish trust.
     Encryption and authentication arrive in Phase 4.
 
+    Wi-Fi Direct supplies only an ADDRESS. The session still runs over TCP through
+    the same transport abstraction, so the protocol is unchanged by the radio.
+
+    Wi-Fi Direct exposes no device friendly name, so `discover` reports device ids.
+
 EXAMPLES:
     p2p listen --addr 127.0.0.1:9000
     p2p connect 127.0.0.1:9000
     p2p ping 127.0.0.1:9000 --name \"Ian's Laptop\"
+    p2p wifi-direct probe
+    p2p wifi-direct connect <device-id>
 ",
         version = env!("CARGO_PKG_VERSION"),
-        bind = default_bind()
+        bind = default_bind(),
+        wifi_direct_flag = wifi_direct_flag()
     )
+}
+
+/// How to turn Wi-Fi Direct support on, given how this binary was built.
+///
+/// Reports the truth about the current build rather than a fixed string, so a
+/// user who just ran the command sees why it is unavailable instead of assuming
+/// the adapter is broken.
+pub fn wifi_direct_flag() -> &'static str {
+    if cfg!(all(windows, feature = "wifi-direct")) {
+        "enabled in this build"
+    } else if cfg!(windows) {
+        "NOT enabled in this build. Rebuild with:\n       cargo run --features wifi-direct --bin p2p -- wifi-direct probe"
+    } else {
+        "not available on this platform (Windows only)"
+    }
 }
 
 #[cfg(test)]
@@ -469,5 +626,216 @@ mod tests {
         let name = default_device_name();
         assert!(!name.is_empty());
         assert!(!name.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn wifi_direct_actions_parse() {
+        assert_eq!(
+            p(&["wifi-direct", "probe"]).unwrap().command,
+            Command::WifiDirect(WifiDirect::Probe)
+        );
+        assert_eq!(
+            p(&["wifi-direct", "discover"]).unwrap().command,
+            Command::WifiDirect(WifiDirect::Discover)
+        );
+        assert_eq!(
+            p(&["wifi-direct", "connect", "abc-123"]).unwrap().command,
+            Command::WifiDirect(WifiDirect::Connect {
+                device_id: "abc-123".into()
+            })
+        );
+    }
+
+    #[test]
+    fn wifi_direct_device_id_is_taken_verbatim() {
+        // Device ids are platform-defined opaque strings. Guessing at their shape
+        // (trimming, case-folding, splitting on a separator) would corrupt them.
+        let id = "MiTM_0F_A2-3B_9C~1(4)";
+        assert_eq!(
+            p(&["wifi-direct", "connect", id]).unwrap().command,
+            Command::WifiDirect(WifiDirect::Connect {
+                device_id: id.into()
+            })
+        );
+    }
+
+    #[test]
+    fn wifi_direct_surrounding_whitespace_is_trimmed_from_the_id() {
+        assert_eq!(
+            p(&["wifi-direct", "connect", "  peer  "]).unwrap().command,
+            Command::WifiDirect(WifiDirect::Connect {
+                device_id: "peer".into()
+            })
+        );
+    }
+
+    #[test]
+    fn wifi_direct_rejects_missing_and_blank_device_ids() {
+        assert_eq!(
+            p(&["wifi-direct", "connect"]).unwrap_err(),
+            ParseError::MissingDeviceId
+        );
+        assert_eq!(
+            p(&["wifi-direct", "connect", "   "]).unwrap_err(),
+            ParseError::MissingDeviceId
+        );
+        assert_eq!(
+            p(&["wifi-direct"]).unwrap_err(),
+            ParseError::MissingDeviceId
+        );
+    }
+
+    #[test]
+    fn wifi_direct_rejects_unknown_actions_and_stray_arguments() {
+        assert_eq!(
+            p(&["wifi-direct", "frobnicate"]).unwrap_err(),
+            ParseError::UnknownWifiDirectAction("frobnicate".into())
+        );
+        // A second id means the user misunderstood the syntax; say so rather than
+        // silently ignoring it.
+        assert_eq!(
+            p(&["wifi-direct", "connect", "a", "b"]).unwrap_err(),
+            ParseError::UnknownWifiDirectAction("b".into())
+        );
+    }
+
+    #[test]
+    fn wifi_direct_does_not_accept_address_flags() {
+        // `--addr` is meaningless here: the address comes from the radio. Silently
+        // accepting it would suggest it had an effect.
+        assert_eq!(
+            p(&["wifi-direct", "connect", "peer", "--addr", "1.2.3.4:5"]).unwrap_err(),
+            ParseError::UnknownFlag {
+                command: "wifi-direct",
+                flag: "--addr".into()
+            }
+        );
+    }
+
+    #[test]
+    fn wifi_direct_still_honours_the_name_flag() {
+        // The device name is carried in the handshake, which runs unchanged, so the
+        // global flag must keep working here.
+        let cli = p(&["wifi-direct", "connect", "peer", "--name", "Test Device"]).unwrap();
+        assert_eq!(cli.device_name, "Test Device");
+        assert_eq!(
+            cli.command,
+            Command::WifiDirect(WifiDirect::Connect {
+                device_id: "peer".into()
+            })
+        );
+    }
+
+    #[test]
+    fn wifi_direct_rejects_a_duplicate_name_flag() {
+        assert_eq!(
+            p(&[
+                "wifi-direct",
+                "connect",
+                "peer",
+                "--name",
+                "a",
+                "--name",
+                "b"
+            ])
+            .unwrap_err(),
+            ParseError::DuplicateFlag("--name")
+        );
+    }
+
+    #[test]
+    fn wifi_direct_advertise_parses_an_optional_duration() {
+        assert_eq!(
+            p(&["wifi-direct", "advertise"]).unwrap().command,
+            Command::WifiDirect(WifiDirect::Advertise {
+                seconds: 120,
+                intensive: false
+            })
+        );
+        assert_eq!(
+            p(&["wifi-direct", "advertise", "30"]).unwrap().command,
+            Command::WifiDirect(WifiDirect::Advertise {
+                seconds: 30,
+                intensive: false
+            })
+        );
+    }
+
+    #[test]
+    fn wifi_direct_advertise_accepts_intensive_in_either_position() {
+        // Flags before or after the duration, because both orderings are natural to
+        // type and neither should be a syntax error.
+        for args in [
+            &["wifi-direct", "advertise", "--intensive"][..],
+            &["wifi-direct", "advertise", "45", "--intensive"][..],
+            &["wifi-direct", "advertise", "--intensive", "45"][..],
+        ] {
+            match p(args).unwrap().command {
+                Command::WifiDirect(WifiDirect::Advertise { seconds, intensive }) => {
+                    assert!(intensive, "intensive not set for {args:?}");
+                    assert!(seconds == 120 || seconds == 45, "bad seconds for {args:?}");
+                }
+                other => panic!("expected Advertise for {args:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn wifi_direct_advertise_rejects_duplicate_intensive() {
+        assert_eq!(
+            p(&["wifi-direct", "advertise", "--intensive", "--intensive"]).unwrap_err(),
+            ParseError::DuplicateFlag("--intensive")
+        );
+    }
+
+    #[test]
+    fn wifi_direct_advertise_rejects_a_bad_duration() {
+        for bad in ["0", "-5", "abc", "1.5", ""] {
+            assert!(
+                matches!(
+                    p(&["wifi-direct", "advertise", bad]).unwrap_err(),
+                    ParseError::BadDuration(_)
+                ),
+                "accepted invalid duration {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_documents_wifi_direct_and_hides_no_state() {
+        let text = usage();
+        for token in ["wifi-direct", "probe", "connect", "discover", "advertise"] {
+            assert!(text.contains(token), "usage does not mention `{token}`");
+        }
+        // The build-flag line must reflect the actual build rather than a fixed
+        // string, so a user who just ran the command learns why it is unavailable.
+        assert!(
+            text.contains(wifi_direct_flag()),
+            "usage does not report the real build state"
+        );
+    }
+
+    #[test]
+    fn wifi_direct_flag_text_matches_the_build() {
+        let flag = wifi_direct_flag();
+        if cfg!(all(windows, feature = "wifi-direct")) {
+            assert!(flag.contains("enabled"));
+            assert!(!flag.contains("NOT enabled"));
+        } else if cfg!(windows) {
+            assert!(flag.contains("NOT enabled"));
+            assert!(flag.contains("--features wifi-direct"));
+        } else {
+            assert!(flag.contains("Windows only"));
+        }
+    }
+
+    #[test]
+    fn wifi_direct_usage_does_not_claim_a_secure_link() {
+        // A direct P2P link is a proximity claim, not an identity one. The text
+        // must not let a reader infer the session is protected.
+        let text = usage();
+        let notes = text.split("NOTES:").nth(1).unwrap_or_default();
+        assert!(notes.contains("UNENCRYPTED"));
+        assert!(notes.contains("UNAUTHENTICATED"));
     }
 }

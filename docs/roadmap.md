@@ -213,12 +213,33 @@ Same binary, same protocol, different address. This isolates protocol bugs from
 platform connectivity bugs **before** Wi-Fi Direct enters the picture.
 
 **Test rig.** Windows Mobile Hotspot on Device A, Device B joins, connect to the
-local gateway IP.
+local gateway IP. Procedure: [`phase2-test.md`](./phase2-test.md).
 
-> **Caveat.** A mobile hotspot is infrastructure-mode AP plus DHCP. It validates
-> *IP connectivity and throughput* — it does **not** exercise Wi-Fi Direct
-> discovery, group formation, or GO negotiation. Treat hotspot results as a
-> Phase-2 baseline only, never as Wi-Fi Direct evidence. See
+### Status: PASS (2026-10-03)
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| 1 | Identical binaries complete a session across two machines | **Met** — both reached `v1` |
+| 2 | No protocol change was needed | **Met** — same `p2p.exe` on both |
+| 3 | Transport abstraction held (no radio concepts leaked) | **Met** — `check.ps1` transport-purity gate |
+| 4 | Framing survived a real network link | **Met** — handshake completed at 229 Mbps |
+
+Results, environment, and the full caveat list: [`performance.md` §5.5](./performance.md).
+
+**Obstacle encountered and resolved.** The first attempt failed with `WSAEACCES`
+(10013) on every TCP port and on ICMP. Cause: `ProtonVPNCallout`, a Windows
+Filtering Platform driver from Proton VPN, in the network stack. It allowed DNS
+and web traffic but refused the LAN connection. Identified by reproducing the same
+error from a plain .NET socket, which proved the OS was filtering rather than
+`p2p` misbehaving. Fixed by disabling the VPN adapter for the test.
+
+**Disable VPNs on both devices before any Phase 2 or Phase 3 test.** The error
+reads like a permissions problem, not a VPN problem, and will cost time again.
+
+> **Caveat, unchanged.** A mobile hotspot is infrastructure-mode AP plus DHCP. It
+> validates IP connectivity and TCP framing. It does **not** exercise Wi-Fi Direct
+> discovery, group formation, or GO negotiation. Hotspot results are a Phase-2
+> baseline only, never Wi-Fi Direct evidence. See
 > [`platform-windows.md`](./platform-windows.md).
 
 ---
@@ -241,6 +262,41 @@ Then run the existing Rust protocol over the resulting connection.
 transport abstraction leaked radio concepts — that is a defect in
 [ADR-0004](./adr/0004-transport-abstraction.md), not a reason to patch the
 protocol.
+
+### Status: IN PROGRESS
+
+Binding decision **resolved** — [ADR-0009](./adr/0009-windows-wifi-direct-binding.md)
+is ratified. `windows` 0.62.2 directly, no helper component; Q-6 is closed.
+
+Done:
+
+- Adapter crate with connect-by-device-id, layered capability detection, deadline
+  enforcement, and zero `unsafe` in its own code.
+- Capability probe validated on real hardware: this host reports
+  `available (wifi-direct)`.
+- **Discovery implemented** via one-shot `DeviceInformation::FindAllAsyncAqsFilter`
+  — no watcher and no event handlers. The earlier "needs a watcher" conclusion was
+  wrong: a watcher is only needed for *continuous* updates. Verified to run on real
+  hardware.
+- **Advertising implemented** via `WiFiDirectAdvertisementPublisher` with an RAII
+  guard, so dropping it stops advertising. Verified to start and stop on real
+  hardware.
+- Empty-result reporting distinguishes "no peers nearby" from "this machine offers
+  no Wi-Fi Direct devices", which need different fixes.
+- CLI wired: `p2p wifi-direct probe | discover | advertise [secs] | connect <id>`,
+  behind the off-by-default `wifi-direct` feature so the binary stays portable and
+  does not ship an unvalidated path.
+- Boundary enforced by five CI gates, including `--all-features` clippy, which
+  caught real dead code. The WinRT gate was validated by negative test.
+
+Not done — these are the remaining Phase 3 exit criteria:
+
+| Item | Why it is still open |
+| --- | --- |
+| Real two-device group formation and handshake | Needs two Windows devices; procedure is written and every command in it has been run individually |
+| DHCP sufficiency on a formed group | Plausible from the API, unverified in practice |
+| Discovery finding a real advertising peer | The scan runs; that it matches a live peer does not |
+| Binding only the P2P interface | Needs `Windows.Networking.Connectivity`; host side uses `0.0.0.0` for now |
 
 ---
 

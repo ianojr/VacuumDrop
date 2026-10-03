@@ -161,9 +161,114 @@ speed here.
    not separated. Real two-device results will differ.
 4. **Loopback socket buffers are large and free**, so this setup does not
    exercise the partial-write and backpressure paths a real network link will.
-   Those remain untested until Phase 2.
+   Those are exercised by the Phase 2 figures in §5.5.
 5. Throughput was measured once per configuration. Repeat runs before treating
    any of these as stable.
+
+---
+
+## 5.5 Phase 2 — Two Machines, Real Network
+
+**Status: PASS.** 2026-10-03.
+
+### Environment
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-10-03 |
+| Link type | Windows Mobile Hotspot (SoftAP, infrastructure mode) |
+| Negotiated rate | 229 Mbps |
+| Device A | hotspot host, gateway `192.168.137.1` |
+| Device B | Intel Core i7-8565U @ 1.80 GHz, `192.168.137.245/24` |
+| OS (both) | Windows 11 Pro 10.0.26300.26300 |
+| Toolchain | rustc 1.92.0 stable-x86_64-pc-windows-msvc |
+| Distance | same room |
+| Binary | identical `p2p.exe` copied to both devices |
+
+### Result
+
+Device B:
+
+```text
+connecting to 192.168.137.1:9000...
+connected: tcp://192.168.137.1:9000
+negotiating protocol version...
+
+session established
+  session id  : session-00000001
+  version     : v1
+  peer        : Device-A
+  chunk size  : 8388608 bytes
+```
+
+### What this establishes
+
+1. **Identical code completed a session across two physical machines** over a
+   real network link, with no code change. This is the condition Phase 3's
+   "protocol requires no changes" claim depends on.
+2. **The transport abstraction held.** `p2p connect` took an address and worked;
+   nothing about Wi-Fi Direct, hotspots, or adapters reached the protocol layer.
+3. **Framing survived a real link.** The handshake required several frames plus
+   the final capabilities exchange over loopback-sized and network-sized reads.
+   The codec's partial-frame handling is exercised by this and by
+   `partial_frames_return_none_and_consume_nothing`.
+4. **Version negotiation succeeded between two builds**, and both sides agreed
+   on the chunk size (8 MiB) as the minimum of the two claims.
+
+### What this does NOT establish
+
+**This is not a Wi-Fi Direct result.** A Windows Mobile Hotspot is
+infrastructure-mode SoftAP plus DHCP. It exercises IP connectivity and TCP. It
+does **not** exercise:
+
+- Wi-Fi Direct peer **discovery**
+- **Group formation**
+- **Group-owner negotiation**
+- Direct-mode link characteristics (no AP in the path, different interference
+  behaviour, different power management)
+
+Recording these figures as Wi-Fi Direct evidence would be a false claim. See
+[`platform-windows.md` §2](./platform-windows.md) and
+[`roadmap.md` §7](./roadmap.md).
+
+### Not measured
+
+No throughput figure is recorded. Phase 2 transfers no data — only a handshake.
+The §5.2 loopback baseline remains the only throughput data, and it still
+carries all five caveats above.
+
+### Environment obstacle worth recording
+
+The first attempt failed with `WSAEACCES` (os error 10013) on **every** TCP port
+and on ICMP, while ARP resolved normally. Cause: `ProtonVPNCallout`, a Windows
+Filtering Platform callout driver from Proton VPN, sitting in the network stack.
+It permitted DNS and web traffic but returned `AccessDenied` for the LAN
+connection.
+
+Diagnosis is recorded because the symptom is misleading:
+
+| Check | Result |
+| --- | --- |
+| Client IP and default route | Correct (`192.168.137.245`, gateway metric 0) |
+| ARP to gateway | Resolves — link is up |
+| Enabled outbound **Block** rules | Only two, both scoped to `127.0.0.0/8` — not our traffic |
+| Windows Firewall profiles | Enabled, defaults not configured |
+| Same error from a plain .NET socket | **Yes** — so not a `p2p` defect |
+| WFP callout drivers running | `ProtonVPNCallout.sys` |
+
+The .NET reproduction is the decisive step: identical error outside Rust means the
+OS is filtering the connection, so no code change would have helped.
+
+**Resolution:** disable the VPN adapter on the client device for the test:
+
+```powershell
+Disable-NetAdapter -Name "ProTUN" -Confirm:$false
+```
+
+**Lesson for the test rig:** a VPN on either device will break Phase 2/3 testing
+with an error that reads like a permissions problem, not a VPN problem. Disable
+VPNs before testing, and check `Get-CimInstance Win32_SystemDriver` for callout
+drivers if an arbitrary LAN connection returns 10013.
 
 ---
 
@@ -173,11 +278,10 @@ speed here.
 | --- | --- | --- |
 | 0 | Raw TCP ceiling, chunk-size curve | **Done** (§5.2) — loopback only |
 | 1 | Cost of framing + serialization vs raw baseline | pending |
-| 2 | Same code, real network — isolates platform from protocol | pending — **required before any network claim** |
-| 2 | Same code, real network — isolates platform from protocol |
-| 3 | Same protocol, Wi-Fi Direct — isolates radio from protocol |
-| 4 | Cost of encryption + authentication |
-| 5 | Cost of hashing, resume, atomic finalization; resume time-to-recover |
+| 2 | Same code, real network — isolates platform from protocol | **Done** (§5.5) — hotspot, 229 Mbps |
+| 3 | Same protocol, Wi-Fi Direct — isolates radio from protocol | pending |
+| 4 | Cost of encryption + authentication | pending |
+| 5 | Cost of hashing, resume, atomic finalization; resume time-to-recover | pending |
 
 Each phase's overhead should be attributed, not merely observed. "Phase 5 is
 slower than Phase 4" is not an answer; "hashing costs 8% because we chose BLAKE3
@@ -206,13 +310,29 @@ over SHA-256" is.
 ## 8. Compatibility Matrix
 
 Maintained as platforms land. **A platform is not "supported" merely because it
-compiles.**
+compiles**, and a column is only `pass` when it was observed working.
 
-| Platform | OS version | Hardware | Wi-Fi adapter | Direct supported | Discovery | Connection | Transfer | Security | Known problems |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Windows | 11 | TBD | TBD | pending | pending | pending | pending | pending | — |
-| Android | 15 | TBD | TBD | pending (P6) | — | — | — | — | — |
-| Linux | Ubuntu | TBD | TBD | pending (P7) | — | — | — | — | experimental |
+Rows are per configuration, not per OS: Wi-Fi Direct behaviour is driver-specific,
+so two machines on the same Windows build are different rows.
+
+| # | Platform | OS build | Hardware | Link | Direct | Discovery | Connect | Session | Transfer | Security | Known problems |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Windows | 11 26300.26300 | i7-8565U | **hotspot, 229 Mbps** | n/a | n/a | **pass** | **pass v1** | pending (P5) | none (P4) | Proton VPN WFP callout returns 10013 on LAN TCP; disable VPN for tests |
+| 2 | Windows | pending | Device A (hotspot host) | **hotspot** | pending (P3) | pending (P3) | **pass** | **pass v1** | pending | none | inbound firewall rule required on the listener |
+| 3 | Windows | 11 | TBD | **Wi-Fi Direct** | pending (P3) | pending (P3) | pending | pending | pending | pending | — |
+| 4 | Android | 15 | TBD | — | pending (P6) | — | — | — | — | — | — |
+| 5 | Linux | Ubuntu | TBD | — | pending (P7) | — | — | — | — | — | experimental |
+
+### Reading this matrix
+
+- **Row 1 is this machine** (client). Row 2 is the peer. Both reached a version-
+  negotiated session.
+- `Direct` is `n/a` for rows 1-2 because a hotspot is **not** Wi-Fi Direct. See
+  §5.5. Row 3 is where that claim gets tested.
+- `Security` reads `none (P4)` — Phase 1 sessions are unencrypted and
+  unauthenticated, and both the CLI and this table say so.
+- Nothing here is marked "supported". Charter 6 forbids claiming that before it is
+  tested, and the Wi-Fi Direct column is entirely untested.
 
 ---
 

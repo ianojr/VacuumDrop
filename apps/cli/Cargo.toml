@@ -38,3 +38,30 @@ tokio = { version = "1", features = [
     "time",
 "signal",
 ] }
+
+# Wi-Fi Direct support is Windows-only and opt-in.
+#
+# Two separate reasons it is NOT a plain dependency:
+#
+#   1. Portability. This binary is the portable front end; the platform crates are
+#      the replaceable back end. A hard dependency would make `p2p` Windows-only,
+#      which is the coupling Charter 47 exists to prevent.
+#   2. Honesty. Real two-device P2P has not been validated yet (docs/roadmap.md
+#      Phase 3). Default-on would ship a path that has never worked.
+#
+# Target-scoped as well as optional, so the `windows` crate is not even compiled on
+# other platforms.
+[target.'cfg(windows)'.dependencies]
+vacuumdrop-platform-windows = { path = "../../crates/vacuumdrop-platform-windows", optional = true }
+
+# Declared last so the tables above are read as dependencies, not features.
+[features]
+default = []
+# Enables `p2p wifi-direct ...`. Requires Windows.
+#
+# Also turns on the adapter's own `discovery` feature, because the one-shot scan it
+# provides is now real: `DeviceInformation::FindAllAsyncAqsFilter` needs no watcher
+# and no event handlers. It is deliberately not left to the user as a second flag to
+# remember - a CLI action that reports "unavailable" for a capability that works is
+# worse than one more feature to carry.
+wifi-direct = ["dep:vacuumdrop-platform-windows", "vacuumdrop-platform-windows/discovery"]

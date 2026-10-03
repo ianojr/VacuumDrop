@@ -98,9 +98,11 @@ Each ADR contains **Context, Decision, Alternatives, Consequences, Status**.
 ```text
 Design          ██████████  complete
 Phase 0         ██████████  DONE - 10 GiB, RSS flat at ~9 MiB
-Phase 1         ████████░░  IMPLEMENTED - all exit criteria met
-Phase 2         ░░░░░░░░░░  next - two machines on a Wi-Fi network
-Decisions       ████████░░  6 resolved, 2 open (Phase 4 / Phase 5)
+Phase 1         ██████████  DONE - 5/5 exit criteria, 262 tests
+Phase 2         ██████████  DONE - two machines, session negotiated at v1
+Phase 3         ░░░░░░░░░░  NEXT - Windows Wi-Fi Direct adapter
+Phase 4-8       ░░░░░░░░░░  security, transfer, android, linux, GUI
+Decisions       ████████░░  9 resolved, 6 open
 ```
 
 **Settled:** project name **VacuumDrop** · crates `vacuumdrop-*` · CLI `p2p` ·
@@ -114,19 +116,26 @@ the network. Full numbers and caveats in
 
 **Phase 1 result:** workspace of five crates, `p2p listen|connect|ping`, version
 negotiation that fails closed, framed codec with pre-allocation length bounds,
-structured error taxonomy, and the full connection state machine. 232 tests pass;
-`scripts/check.ps1` gates format, clippy, build, tests, dependency direction, the
-`unsafe_code = "forbid"` policy, and transport-abstraction purity.
+structured error taxonomy, and the full connection state machine. `scripts/check.ps1`
+gates format, clippy, build, tests, dependency direction, the
+`unsafe_code = "forbid"` policy, transport-abstraction purity, and fuzzing.
+
+**Phase 2 result:** two physical machines, identical binary, session negotiated at
+`v1` over a 229 Mbps hotspot link. **This is not a Wi-Fi Direct result** — a
+hotspot is infrastructure-mode AP plus DHCP, so discovery, group formation, and
+group-owner negotiation remain untested.
 
 ```text
-$ p2p connect 127.0.0.1:9000
+$ p2p connect 192.168.137.1:9000
+connected: tcp://192.168.137.1:9000
 session established
   version     : v1
-  peer        : Server-Device
+  peer        : Device-A
 ```
 
-**Next:** Phase 2 — run the identical binaries across two machines on a Wi-Fi
-network. No protocol changes.
+**Next:** Phase 3 — the Windows Wi-Fi Direct adapter, after the ADR-0009 spike.
+**Disable any VPN on both devices first**: a Proton VPN callout driver was
+observed returning `10013` on LAN TCP.
 
 ---
 

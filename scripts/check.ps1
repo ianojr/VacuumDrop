@@ -44,8 +44,19 @@ function Gate {
 
 Gate 'format' { cargo fmt --all -- --check }
 Gate 'clippy' { cargo clippy --workspace --all-targets -- -D warnings }
+
+# Feature-gated code is invisible to the gate above. Without this, `p2p wifi-direct`
+# and the CLI's `wifi-direct` arm would compile only when someone remembered to
+# ask for them, and could rot indefinitely behind a green build. Gated code that is
+# never compiled is not tested code.
+Gate 'clippy (all features)' { cargo clippy --workspace --all-targets --all-features -- -D warnings }
+
+# Both feature states are built, because the *disabled* path is a real code path
+# with its own error text, not an absence of one.
+Gate 'build (no default features)' { cargo build --workspace --no-default-features }
 Gate 'build' { cargo build --workspace }
 Gate 'test' { cargo test --workspace }
+Gate 'test (all features)' { cargo test --workspace --all-features }
 
 # Charter 47 and engineering rule 5: platform code must never reach the core.
 # Enforced structurally rather than by review, because review fails eventually.
@@ -106,6 +117,127 @@ if ($leaked.Count -gt 0) {
 }
 else {
     Write-Host "PASS: transport surface has no radio concepts"
+}
+
+# Charter 47 / engineering rule 5: no WinRT type may appear in the platform
+# adapter's public API. This is the rule most likely to erode silently, because a
+# single "helpful" signature change can leak a COM type into the core without
+# breaking anything that compiles today.
+#
+# Scanned across ALL cfg variants, so `#[cfg(feature = ...)]` code cannot hide a
+# leak. Whitelist is exactly one function, by name, with a documented reason.
+Write-Host ""
+Write-Host "=== WinRT boundary discipline ==="
+$adapterRoot = "crates\vacuumdrop-platform-windows\src"
+$winrtPatterns = @(
+    'windows::', 'windows_core::', 'windows_future::',
+    '\bHSTRING\b', '\bHRESULT\b', '\bWiFiDirect\w*', '\bNetworkAdapter\b',
+    '\bHostName\b', '\bEndpointPair\b', '\bIAsyncOperation\b',
+    '\bIUnknown\b', '\bInterface\b', '\bAsyncStatus\b'
+)
+# Whitelist of sanctioned exceptions, by function name. Intentionally EMPTY.
+#
+# It used to hold `peer_from_device`, which was removed as unreachable dead code
+# once `--all-features` clippy flagged it. An empty list is the right steady state:
+# every future exception has to be added here deliberately, which is exactly the
+# friction that makes someone think twice about leaking a COM type upward.
+$sanctioned = @()
+
+$leaks = @()
+if (Test-Path -LiteralPath $adapterRoot) {
+    Get-ChildItem -Path $adapterRoot -Recurse -Filter *.rs | ForEach-Object {
+        $file = $_
+        $lines = Get-Content -LiteralPath $file.FullName
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
+            # Only public signatures matter; private WinRT use is the whole point
+            # of the adapter.
+            if ($line -match '^\s*pub(\(crate\))?\s+(async\s+)?fn\s+(\w+)') {
+                $fnName = $Matches[3]
+
+                # Collect ONLY the signature, then stop.
+                #
+                # Tracking brace depth is the reliable way to find where the body
+                # starts. Regex-terminator attempts looked simpler and were wrong:
+                # a signature like `pub fn f() -> Capability {` does not end at the
+                # first `)` because the return type follows it. A false positive
+                # here trains people to ignore the gate, which is worse than no
+                # gate at all.
+                $sig = $line
+                $depth = 0
+                $sawParen = $false
+                $terminated = $false
+
+                for ($j = 0; $j -le 10 -and ($i + $j) -lt $lines.Count; $j++) {
+                    if ($j -gt 0) { $sig += ' ' + $lines[$i + $j] }
+                    $chunk = if ($j -eq 0) { $lines[$i] } else { $lines[$i + $j] }
+
+                    $depth += ([regex]::Matches($chunk, '\{')).Count
+                    $depth -= ([regex]::Matches($chunk, '\}')).Count
+
+                    if ($chunk -match '\(') { $sawParen = $true }
+
+                    # A closing paren followed by `->` or `{` or `;` or end-of-line
+                    # means the parameter list is done.
+                    if ($sawParen -and $chunk -match '\)\s*(->[^{;]*)?\s*(\{|;)?\s*$') {
+                        $terminated = $true
+                    }
+
+                    # An opening brace at depth 0 (relative) ends the signature.
+                    if ($chunk -match '\{' -and $depth -le 1 -and $sawParen) {
+                        $terminated = $true
+                        break
+                    }
+                    if ($chunk -match '\s*\{\s*$' -and $sawParen) {
+                        $terminated = $true
+                        break
+                    }
+                }
+                if (-not $terminated) { continue }
+                foreach ($p in $winrtPatterns) {
+                    if ($sig -match $p) {
+                        $rel = $file.FullName.Substring((Get-Location).Path.Length + 1)
+                        $entry = "$rel`:$($i + 1)  $fnName  [$p]"
+                        # `pub(crate)` is crate-internal, which is the sanctioned shape.
+                        if ($line -notmatch 'pub\(crate\)' -and $sanctioned -notcontains $fnName) {
+                            $leaks += $entry
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+if ($leaks.Count -gt 0) {
+    foreach ($l in $leaks) { Write-Host "  LEAK: $l" }
+    Write-Host "FAIL: WinRT types in the adapter's public API (Charter 47)"
+    $failed += 'WinRT boundary'
+}
+else {
+    Write-Host "PASS: no WinRT type in any public signature"
+}
+
+# Charter 47: platform code must be quarantined. Every crate that depends on the
+# `windows` crate must live under vacuumdrop-platform-*.
+Write-Host ""
+Write-Host "=== platform quarantine ==="
+$windowsDeps = @()
+Get-ChildItem -Path "crates", "apps" -Directory | ForEach-Object {
+    $manifest = Join-Path $_.FullName "Cargo.toml"
+    if (Test-Path -LiteralPath $manifest) {
+        $text = Get-Content -LiteralPath $manifest -Raw
+        if ($text -match '(?m)^\s*windows\s*=' -or $text -match '(?m)^\s*windows-future\s*=') {
+            $windowsDeps += $_.Name
+        }
+    }
+}
+$bad = $windowsDeps | Where-Object { $_ -notmatch '^vacuumdrop-platform' }
+if ($bad.Count -gt 0) {
+    Write-Host "FAIL: crates depending on `windows` outside vacuumdrop-platform-*: $($bad -join ', ')"
+    $failed += 'platform quarantine'
+}
+else {
+    Write-Host "PASS: windows dependency confined to $($windowsDeps.Count) platform crate(s)"
 }
 
 # Charter 53: fuzz the parser. Attempted, not assumed.

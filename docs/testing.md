@@ -204,19 +204,70 @@ fuzz/                  # cargo-fuzz targets
 
 ## 9. CI Gates
 
-Proposed, enforced on every change:
+All of these are enforced by [`../scripts/check.ps1`](../scripts/check.ps1), which
+is the authoritative list. Running it is the gate.
 
 ```text
-[ ] cargo fmt --check
-[ ] cargo clippy -- -D warnings
-[ ] cargo build
-[ ] cargo test
-[ ] cargo test --doc
-[ ] cargo fuzz run <targets> -- -max_total_time=60
-[ ] cargo tree  # no core crate depends on a platform crate
-[ ] cargo audit (if adopted)
-[ ] core crates contain no `unsafe` without a documented justification
+[x] cargo fmt --all -- --check
+[x] cargo clippy --workspace --all-targets -- -D warnings
+[x] cargo clippy --workspace --all-targets --all-features -- -D warnings
+[x] cargo build --workspace --no-default-features
+[x] cargo build --workspace
+[x] cargo test --workspace
+[x] cargo test --workspace --all-features
+[x] no core crate depends on a platform crate      (dependency direction)
+[x] workspace forbids unsafe_code
+[x] transport surface has no radio concepts
+[x] no WinRT type in any public signature
+[x] windows dependency confined to vacuumdrop-platform-*
+[~] cargo fuzz run <targets>                        (skipped, see section 4.1)
+[ ] cargo audit                                      (not yet adopted)
 ```
+
+### 9.1 Why the `--all-features` gates exist
+
+Feature-gated code is invisible to a default `cargo clippy` or `cargo test`. Two
+separate gates are needed, and the second one was added only after the first proved
+insufficient:
+
+- `clippy --all-features` **compiles** the gated code. Without it, `p2p
+  wifi-direct` would build only when someone remembered to ask, and could rot
+  behind a green build. This gate flagged `peer_from_device` as unreachable dead
+  code, which was then removed rather than silenced with `#[allow(dead_code)]`.
+- `test --all-features` **runs** the gated tests. Compiling them is not the same as
+  executing them: a stale test asserting that discovery was still unimplemented
+  compiled cleanly and failed only at runtime. That failure was invisible to the
+  compile-only gate, which is why the run gate was added.
+
+The general rule: **gated code that is never compiled is not tested code, and gated
+code that is compiled but not run is only half-tested.**
+
+### 9.2 Why `--no-default-features` is a separate gate
+
+The *disabled* path is a real code path with its own error text, not an absence
+of one. `p2p wifi-direct probe` without the feature must compile and must explain
+how to rebuild.
+
+### 9.3 Gates that assert an architecture
+
+The last four checks are not about test coverage. They enforce properties that
+decay silently and are invisible to the compiler:
+
+| Gate | Property | Erosion it prevents |
+| --- | --- | --- |
+| Dependency direction | Core never depends on a platform crate | The core becoming Windows-only |
+| `unsafe_code` forbid | No hand-written `unsafe` anywhere | A shortcut that bypasses the safe API |
+| Transport purity | No `group_owner`/`advertisement` in the transport surface | Radio concepts leaking into the protocol layer |
+| WinRT boundary | No COM type in a `pub` signature | A "helpful" signature change pulling WinRT into the core |
+| Platform quarantine | Only `vacuumdrop-platform-*` may depend on `windows` | The heavy dependency spreading |
+
+The WinRT boundary gate was validated by **negative test**: a deliberate leak was
+injected, the gate failed as intended, and the injection was reverted. A gate that
+has only ever passed has not been shown to work.
+
+It also scans across **all `cfg` variants**, so feature-gated code cannot hide a
+violation, and its exception list is intentionally empty — adding an exception
+requires editing the gate deliberately.
 
 The dependency-direction check is the mechanical enforcement of
 [`architecture.md` §9](./architecture.md). If it is not automated, it will be
@@ -235,3 +286,5 @@ violated.
 | §6, §7 | Charter §52, §30, §61 |
 | §8 | Charter §8 |
 | §9 | Derived from Charter §33, §47, §98 |
+| §9.1, §9.2 | Charter §47 (thin platform adapters), §98 |
+| §9.3 | Charter §33, §47 |
