@@ -1,0 +1,40 @@
+[package]
+name = "vacuumdrop-tests"
+description = "Cross-crate integration tests for the VacuumDrop engine"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Integration tests live here rather than in a crate's own `tests/` directory
+# because they exercise several crates together. A Session is meaningless
+# without a transport, and a transport is meaningless without a codec, so the
+# meaningful tests necessarily span crates.
+#
+# These are `[dependencies]` rather than `[dev-dependencies]`: `src/lib.rs` holds
+# the shared helpers, and it is compiled as a normal library target, so it needs
+# the same crates a test does.
+
+[dependencies]
+vacuumdrop-core = { path = "../crates/vacuumdrop-core" }
+vacuumdrop-protocol = { path = "../crates/vacuumdrop-protocol" }
+vacuumdrop-transport = { path = "../crates/vacuumdrop-transport" }
+
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+    "sync",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# postcard is needed directly: stress.rs round-trips messages through the codec
+# and re-encodes them, asserting the wire format is stable.
+postcard = { version = "1", features = ["use-std"] }
+
+# Property tests for the untrusted-input surface (Charter 52).
+proptest = "1"

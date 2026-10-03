@@ -1,0 +1,26 @@
+[package]
+name = "vacuumdrop-transport"
+description = "VacuumDrop transport abstraction and TCP implementation"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Deliberately minimal. The transport moves bytes and knows nothing about
+# VacuumDrop messages -- framing is the protocol crate's job. Keeping that split
+# sharp is what makes the transport swappable (ADR-0004).
+#
+# tokio: async sockets. Features are selected individually, not `full`
+#        (ADR-0002 section 4.1).
+# thiserror: consistent with the other crates.
+
+[dependencies]
+vacuumdrop-core = { path = "../vacuumdrop-core" }
+
+thiserror = "2"
+tokio = { version = "1", features = ["net", "io-util", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }

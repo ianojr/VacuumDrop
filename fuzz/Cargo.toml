@@ -1,0 +1,54 @@
+[package]
+name = "vacuumdrop-fuzz"
+version = "0.0.0"
+edition = "2024"
+description = "Fuzz targets for the VacuumDrop protocol parser"
+publish = false
+
+# DETACHED WORKSPACE ON PURPOSE.
+#
+# This is not a member of the main workspace. cargo-fuzz needs nightly, and a
+# member would force the entire workspace to build under nightly for every
+# command. An empty `[workspace]` table detaches this package from the parent
+# resolver, so `cargo build --workspace` at the repo root never touches it.
+[workspace]
+
+# Fuzz targets are a development instrument, never shipped. `debug = 1` keeps
+# stack traces useful without the cost of full debuginfo.
+[profile.release]
+debug = 1
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# Needed directly by the targets: `FrameCodec` implements tokio-util's
+# `Decoder`, and fuzzing it means calling `decode` on a `BytesMut`.
+tokio-util = { version = "0.7", features = ["codec"] }
+postcard = { version = "1", features = ["use-std"] }
+
+[dependencies.vacuumdrop-core]
+path = "../crates/vacuumdrop-core"
+
+[dependencies.vacuumdrop-protocol]
+path = "../crates/vacuumdrop-protocol"
+
+[[bin]]
+name = "frame_parser"
+path = "targets/frame_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "message_decoder"
+path = "targets/message_decoder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "peer_validation"
+path = "targets/peer_validation.rs"
+test = false
+doc = false

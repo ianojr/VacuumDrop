@@ -1,0 +1,26 @@
+[package]
+name = "vacuumdrop-bench"
+description = "Phase 0 raw Tokio TCP throughput benchmark for VacuumDrop"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Phase 0 deliberately uses `tokio` with the `full` feature: this crate exists
+# to measure a ceiling as fast as possible, and feature selection is noise here.
+#
+# The rest of the workspace MUST select Tokio features per crate instead.
+# See docs/adr/0002-tokio.md section 4.1.
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "sender"
+path = "src/bin/sender.rs"
+
+[[bin]]
+name = "receiver"
+path = "src/bin/receiver.rs"

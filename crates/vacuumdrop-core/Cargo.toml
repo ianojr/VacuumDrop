@@ -1,0 +1,20 @@
+[package]
+name = "vacuumdrop-core"
+description = "VacuumDrop core domain types, errors, limits, state machine and events"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Core owns the error taxonomy (Charter 39) and the configuration every other
+# crate validates against. It deliberately depends on NOTHING that could couple
+# it to a platform, a wire format, or a runtime detail.
+#
+# thiserror: proc-macro only, no runtime dependency. Removes ~200 lines of
+# hand-maintained Display/Error boilerplate across ten error types. See
+# docs/dep-justification.md.
+
+[dependencies]
+thiserror = "2"

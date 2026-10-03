@@ -1,0 +1,40 @@
+[package]
+name = "vacuumdrop-cli"
+description = "The p2p command-line interface"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "p2p"
+path = "src/main.rs"
+
+# Argument parsing is hand-rolled rather than pulled from clap.
+#
+# Rationale (Charter 54 requires this be justified, not assumed):
+#   - The Phase 1 surface is six subcommands with a handful of flags.
+#   - clap would add a dependency, a proc-macro build step, and a compile-time
+#     cost for something this small.
+#   - Hand-rolled parsing here is ~120 lines, fully tested, and produces better
+#     error messages for this specific CLI.
+#
+# Revisit if the surface grows materially: the moment subcommands gain nested
+# flags, aliases, and completions, this becomes the wrong trade. Recorded as a
+# deliberate decision, not an oversight.
+
+[dependencies]
+vacuumdrop-core = { path = "../../crates/vacuumdrop-core" }
+vacuumdrop-protocol = { path = "../../crates/vacuumdrop-protocol" }
+vacuumdrop-transport = { path = "../../crates/vacuumdrop-transport" }
+
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "time",
+"signal",
+] }

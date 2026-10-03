@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/vacuumdrop-bench", "crates/vacuumdrop-core", "crates/vacuumdrop-protocol", "crates/vacuumdrop-transport", "apps/cli", "tests"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# NOTE: `license` is intentionally absent.
+# The source charter never specified a license, and every dependency we add must
+# be checked for license compatibility. Tracked as Q-11 in
+# docs/open-questions.md -- decide it before the first dependency lands.
+#
+# `edition` / `rust-version` are provisional. Tracked as Q-12 in
+# docs/open-questions.md. `rust-toolchain.toml` pins the developer toolchain;
+# `rust-version` below is the intended MSRV once Q-12 is settled.
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

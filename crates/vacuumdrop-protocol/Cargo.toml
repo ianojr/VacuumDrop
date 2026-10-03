@@ -1,0 +1,36 @@
+[package]
+name = "vacuumdrop-protocol"
+description = "VacuumDrop wire protocol: framing, message encoding, validation, negotiation"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Per Charter 89, every dependency below is evaluated rather than assumed.
+# Full rationale: docs/dep-justification.md
+#
+# serde      - derives. ADR-0007 rule 8 makes protocol types a reviewed public
+#              API, and derive is what keeps field order explicit.
+# postcard   - wire format. SELECTED in ADR-0007 over bincode (breaking v1
+#              rewrite) and rmp-serde (self-describing bytes are wasted on an
+#              untrusted wire).
+# tokio      - the codec and session are async. Features are selected
+#              individually, not `full` (ADR-0002 section 4.1).
+# tokio-util - codec framing, named by Charter 11 and ADR-0007.
+# thiserror  - proc-macro only, consistent with the other crates.
+
+[dependencies]
+vacuumdrop-core = { path = "../vacuumdrop-core" }
+vacuumdrop-transport = { path = "../vacuumdrop-transport" }
+
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[dev-dependencies]
+proptest = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"] }
